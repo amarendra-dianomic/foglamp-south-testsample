@@ -116,7 +116,7 @@ def plugin_start(handle):
                 if (time_time() - start) > period:
                     start += period
                     time_stamp = utils.local_timestamp()
-                    asset_srl = 1 if asset_srl > no_of_assets else asset_srl+1
+                    asset_srl = 1 if asset_srl+1 > no_of_assets else asset_srl+1
                     data = {
                         'asset': "{}_{}".format(handle['assetName']['value'], asset_srl),
                         'timestamp': time_stamp,
