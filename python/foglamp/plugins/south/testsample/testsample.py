@@ -41,7 +41,7 @@ _DEFAULT_CONFIG = {
     'noOfAssets': {
         'description': 'No. of assets to generate',
         'type': 'integer',
-        'default': '1',
+        'default': '2500',
         'order': '2'
     },
     'dataPointsPerSec': {
@@ -99,18 +99,21 @@ def plugin_start(handle):
         TimeoutError
     """
     global _should_stop, _stopped
-    def save_data():
+    def save_data(loop):
         global _should_stop, _stopped
+        asyncio.set_event_loop(loop)
+
         try:
             time_time = time.time
             start = time_time()
-            period = 1.0 / int(handle['dataPointsPerSec']['value'])
+            recs = int(handle['dataPointsPerSec']['value'])
+            period = 1.0 / recs
             asset_srl = 0
             no_of_assets = int(handle['noOfAssets']['value'])
+            cn = 0
+            cn_time = time.time()
             while True:
-                try:
-                    assert not _should_stop
-                except:
+                if _should_stop:
                     _stopped = True
                     return
                 if (time_time() - start) > period:
@@ -130,15 +133,21 @@ def plugin_start(handle):
                     Ingest.add_readings(asset='{}'.format(data['asset']),
                                               timestamp=data['timestamp'], key=data['key'],
                                               readings=data['readings'])
+                    cn += 1
+                    if cn == recs:
+                        _LOGGER.exception(">>>> %s recs in % secs", recs, time.time()-cn_time)
+                        cn = 0
+                        cn_time = time.time()
         except RuntimeWarning as ex:
             _LOGGER.exception("TestSample warning: {}".format(str(ex)))
         except (Exception, RuntimeError) as ex:
             _LOGGER.exception("TestSample exception: {}".format(str(ex)))
             raise exceptions.DataRetrievalError(ex)
-    _should_stop = False
-    t = Thread(target=save_data)
-    t.start()
 
+    _should_stop = False
+    loop = asyncio.get_event_loop()
+    t = Thread(target=save_data, args=(loop,))
+    t.start()
 
 def plugin_reconfigure(handle, new_config):
     """ Reconfigures the plugin
