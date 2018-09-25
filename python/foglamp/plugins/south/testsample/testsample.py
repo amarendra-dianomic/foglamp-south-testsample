@@ -12,7 +12,7 @@ import uuid
 import logging
 import time
 import random
-from threading import Thread, Event
+from threading import Timer
 from foglamp.common import logger
 from foglamp.plugins.common import utils
 from foglamp.services.south import exceptions
@@ -53,8 +53,11 @@ _DEFAULT_CONFIG = {
 }
 
 _LOGGER = logger.setup(__name__, level=logging.INFO)
-_should_stop = None
-_stopped = None
+_task = None
+no_of_assets = 0
+asset_srl = 0
+cn = 0
+cn_time = None
 
 
 def plugin_info():
@@ -98,56 +101,61 @@ def plugin_start(handle):
     Raises:
         TimeoutError
     """
-    global _should_stop, _stopped
-    def save_data(loop):
-        global _should_stop, _stopped
-        asyncio.set_event_loop(loop)
-
+    global _task, no_of_assets, cn, asset_srl, cn_time
+    async def save_data():
+        global no_of_assets, cn, asset_srl, cn_time
         try:
-            time_time = time.time
-            start = time_time()
-            recs = int(handle['dataPointsPerSec']['value'])
-            period = 1.0 / recs
-            asset_srl = 0
-            no_of_assets = int(handle['noOfAssets']['value'])
-            cn = 0
-            cn_time = time.time()
-            while True:
-                if _should_stop:
-                    _stopped = True
-                    return
-                if (time_time() - start) > period:
-                    start += period
-                    time_stamp = utils.local_timestamp()
-                    asset_srl = 1 if asset_srl+1 > no_of_assets else asset_srl+1
-                    data = {
-                        'asset': "{}_{}".format(handle['assetName']['value'], asset_srl),
-                        'timestamp': time_stamp,
-                        'key': str(uuid.uuid4()),
-                        'readings': {
-                            "x": random.random(),
-                            "y": random.random(),
-                            "z": random.random(),
-                        }
-                    }
-                    Ingest.add_readings(asset='{}'.format(data['asset']),
-                                              timestamp=data['timestamp'], key=data['key'],
-                                              readings=data['readings'])
-                    cn += 1
-                    if cn == recs:
-                        _LOGGER.exception(">>>> %s recs in % secs", recs, time.time()-cn_time)
-                        cn = 0
-                        cn_time = time.time()
+            time_stamp = utils.local_timestamp()
+            asset_srl = 1 if asset_srl+1 > no_of_assets else asset_srl+1
+            data = {
+                'asset': "{}_{}".format(handle['assetName']['value'], asset_srl),
+                'timestamp': time_stamp,
+                'key': str(uuid.uuid4()),
+                'readings': {
+                    "x": random.random(),
+                    "y": random.random(),
+                    "z": random.random(),
+                }
+            }
+            await Ingest.add_readings(asset='{}'.format(data['asset']),
+                                      timestamp=data['timestamp'], key=data['key'],
+                                      readings=data['readings'])
+            cn += 1
+            if cn == recs:
+                _LOGGER.exception(">>>> %s recs in % secs", recs, time.time()-cn_time)
+                cn = 0
+                cn_time = time.time()
         except RuntimeWarning as ex:
             _LOGGER.exception("TestSample warning: {}".format(str(ex)))
         except (Exception, RuntimeError) as ex:
             _LOGGER.exception("TestSample exception: {}".format(str(ex)))
             raise exceptions.DataRetrievalError(ex)
 
-    _should_stop = False
+    def run_task(loop):
+        global _task
+        global no_of_assets, cn, asset_srl
+        asyncio.set_event_loop(loop)
+        asyncio.ensure_future(save_data(), loop=loop)
+        # Chain next iteration
+        _task = Timer(period, run_task, args=(loop, ))
+        _task.start()
+
+    try:
+        recs = int(handle['dataPointsPerSec']['value'])
+        period = round(1.0 / recs, len(str(recs)) + 1)
+    except ZeroDivisionError:
+        _LOGGER.warning('Data points per second must be greater than 0, defaulting to 1')
+        period = 1.0
+
+    no_of_assets = int(handle['noOfAssets']['value'])
+    asset_srl = 0
+    cn = 0
+    cn_time = time.time()
+
     loop = asyncio.get_event_loop()
-    t = Thread(target=save_data, args=(loop,))
-    t.start()
+    # Start first time
+    _task = Timer(period, run_task, args=(loop, ))
+    _task.start()
 
 def plugin_reconfigure(handle, new_config):
     """ Reconfigures the plugin
@@ -181,7 +189,8 @@ def plugin_shutdown(handle):
     Returns:
         plugin shutdown
     """
-    global _should_stop, _stopped
-    while not _stopped:
-        _should_stop = True
+    global _task
+    if _task is not None:
+        _task.cancel()
+        _task = None
     _LOGGER.info('testsample plugin shut down.')
